@@ -1,26 +1,24 @@
 from dataclasses import dataclass
-from typing import List, Literal
+from typing import List
 
 from util.hparams import HyperParams
 
 
 @dataclass
-class AlphaEditHyperParams(HyperParams):
+class ROMELTIHyperParams(HyperParams):
     # Method
-    model_name: str
     layers: List[int]
-    layer_selection: Literal["all", "random"]
-    fact_token: Literal[
-        "last", "subject_first", "subject_last", "subject_first_after_last"
-    ]
+    fact_token: str
     v_num_grad_steps: int
     v_lr: float
     v_loss_layer: int
     v_weight_decay: float
     clamp_norm_factor: float
-    kl_factor: float
+    mid_kl_factor: float
+    last_kl_factor: float
+    nll_factor: float
     mom2_adjustment: bool
-    mom2_update_weight: float
+    context_template_length_params: List[List[int]]
 
     # Module templates
     rewrite_module_tmp: str
@@ -34,11 +32,10 @@ class AlphaEditHyperParams(HyperParams):
     mom2_dataset: str
     mom2_n_samples: int
     mom2_dtype: str
-    nullspace_threshold: float
-    L2: float
 
-    #new hparams
-    prob_cutoff: float
-    norm_control: float
-    calculate_norms: bool
+    # Midlayer Constraint
+    midlayers: List[int]
 
+    # Sentence Transformers
+    sentence_model_name: str = None
+    top_k: int = 4

@@ -9,7 +9,7 @@ CONDA_HOME=$CONDA_HOME ./scripts/setup_conda.sh
 
 
 ## Running the experiments
-To evaluate ENCORE, run the following command:
+To evaluate MPES + Norm-Constraint in the code we called ENCORE (Early stopping and Norm-Constrained Robust knowledge Editing), run the following command:
 
 ```python
 python experiments/evaluate_unified_editing.py \

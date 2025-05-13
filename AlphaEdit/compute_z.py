@@ -40,9 +40,7 @@ def compute_z(
         "input_ids"
     ][0]
 
-    if 'llama-2' in model.config._name_or_path.lower():
-        target_ids = target_ids[2:]
-    elif target_ids[0] == tok.bos_token_id or target_ids[0] == tok.unk_token_id:
+    if target_ids[0] == tok.bos_token_id or target_ids[0] == tok.unk_token_id:
         target_ids = target_ids[1:]
 
 
@@ -191,7 +189,7 @@ def compute_z(
         )
 
 
-        if hparams.prob_cutoff < 0 and num_correct == 5:    # if hparams.prob_cutoff is negative, it acts as a counter to number of steps - 1 to do after target reaches rank = 1
+        if hparams.prob_cutoff < 0 and num_correct == len(target_token_index):    # if hparams.prob_cutoff is negative, it acts as a counter to number of steps - 1 to do after target reaches rank = 1
             correct_counter += 1
             if correct_counter == abs(hparams.prob_cutoff):
                 break

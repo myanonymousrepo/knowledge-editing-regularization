@@ -2,57 +2,51 @@ import os
 from copy import deepcopy
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
-
+import csv
 import numpy as np
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
+import time
 
 from rome.layer_stats import layer_stats
 from util import nethook
 from util.generate import generate_fast
 from util.globals import *
-from datetime import datetime
-import time
 
 from .compute_ks import compute_ks
 from .compute_z import compute_z, get_module_input_output_at_words, find_fact_lookup_idx
-from .emmet_hparams import EMMETHyperParams
-
+from .AlphaEdit_hparams_lti import AlphaEditLTIHyperParams
 # Cache variable(s)
 CONTEXT_TEMPLATES_CACHE = None
 COV_CACHE = {}
 SEQ_CACHE = {}
-SVD_CACHE = {}
-SVD_VECTORS = {}
+PROJECTIONS = {}
 
-def svd_descending(matrix):
-    """Computes the SVD of a matrix and arranges singular values and vectors in descending order."""
-
-    dim1, dim2 = matrix.shape
-    if dim1 < dim2:
-        U, S, Vh = torch.linalg.svd(matrix)
-    else:
-        U, S, Vh = torch.linalg.svd(matrix.T)
-
-    # Sort singular values in descending order
-    S, indices = torch.sort(S, descending=True)
-
-    # Rearrange singular vectors accordingly
-    U = U[:, indices]
-    Vh = Vh[indices, :]
-
-    column_norms = torch.norm(U, dim = 0)
-    U = U / column_norms
-
-    return U, S, Vh
+def get_project(model, tok, layer, hparams):
+    force_recompute = False
+    cov = get_cov(
+        model,
+        tok,
+        hparams.rewrite_module_tmp.format(layer),
+        hparams.mom2_dataset,
+        hparams.mom2_n_samples
+        if not force_recompute
+        else hparams.mom2_n_samples // 10,
+        hparams.mom2_dtype,
+        force_recompute=force_recompute,
+    ).cpu()
+    U, S, _ = torch.linalg.svd(cov, full_matrices=False)
+    threshold = hparams.nullspace_threshold
+    small_singular_indices = (S < threshold).nonzero(as_tuple=True)[0]
+    print(len(small_singular_indices))
+    return U[:, small_singular_indices] @ U[:, small_singular_indices].T
 
 
-
-def apply_emmet_to_model(
+def apply_AlphaEdit_lti_to_model(
     model: AutoModelForCausalLM,
     tok: AutoTokenizer,
     requests: List[Dict],
-    hparams: EMMETHyperParams,
+    hparams: AlphaEditLTIHyperParams,
     copy=False,
     return_orig_weights=False,
     cache_template: Optional[str] = None,
@@ -63,20 +57,20 @@ def apply_emmet_to_model(
         Note that you are responsible for deallocating the new model's memory to avoid leaks.
     :return: (1) the updated model, (2) an original copy of the weights that changed
     """
-    global SVD_CACHE
 
     weights_copy = {}
     if copy:
         model = deepcopy(model)
 
-    deltas, z_norms = execute_emmet( model, tok, requests, hparams, cache_template=cache_template)
+    deltas, z_norms, time_compute_z, total_inserting = execute_alphaedit(model, tok, requests, hparams, cache_template=cache_template)
     distances = {}
     distances['z_norms'] = z_norms
 
     with torch.no_grad():
-        for w_name, (key_mat, val_mat, preservation_distance, new_edit_distance, old_edit_distance, inside_norms) in deltas.items():
-            key_mat, val_mat = key_mat.to("cuda"), val_mat.to("cuda")
-            upd_matrix = key_mat @ val_mat.T
+        for w_name, (upd_matrix, inside_norms) in deltas.items():
+
+            upd_matrix = upd_matrix.to("cuda")
+
             w = nethook.get_parameter(model, w_name)
             upd_matrix = upd_matrix_match_shape(upd_matrix, w.shape)
 
@@ -85,65 +79,33 @@ def apply_emmet_to_model(
 
             original_weights_norm = torch.norm(w[...]).detach().cpu().item()
 
-            #cache spectral norm of original weights
-            if w_name not in SVD_CACHE:
-                print('adding SVD')
-                U, S, Vh = svd_descending(w[...])
-                spectral_norm = torch.max(S)
-                SVD_CACHE[w_name] = spectral_norm.item()
-
-                #store svd vectors
-                SVD_VECTORS[w_name] = (U.detach().cpu().clone(), Vh.detach().cpu().clone())
-
-
             w[...] += upd_matrix.float()
 
-            #check angle with original left singular vectors
-            #U, S, Vh = svd_descending(w[...])
-            #left_angles = torch.diag(U.T @ SVD_VECTORS[w_name][0].cuda()).detach().cpu().tolist()
-
-            #cap singular value to 11
-            #sv_cap = SVD_CACHE[w_name]
-            #U, S, Vh = torch.linalg.svd(w[...], full_matrices=False) 
-            #S_clipped = torch.clamp(S, max=sv_cap)
-            #if hparams.cap_sv:
-            #    w[...] =  U @ torch.diag(S_clipped) @ Vh
-
-            #rescale norm
-            new_weights_norm = torch.norm(w[...]).detach().cpu().item()
-            alpha = original_weights_norm/new_weights_norm
-            #if hparams.norm_rescaling:
-            #    w[...] *= alpha
-
-            #spectral normalization
-            #gamma = SVD_CACHE[w_name]
-            #_, S, _ = torch.linalg.svd(w[...], full_matrices=False)
-            #spectral_norm = torch.max(S)
-            #if hparams.spectral_normalization:
-            #    w[...] = gamma * (w[...] / spectral_norm)
-
-            start = time.time()
-            _, svd_upd, _ = torch.linalg.svd(upd_matrix)
-            svd_upd = sorted(svd_upd.detach().cpu().tolist(), reverse=True)
-            
-            _, svd_final, _ = torch.linalg.svd(w[...])
-            svd_final = sorted(svd_final.detach().cpu().tolist(), reverse=True)
-            print('svd calculation time:', time.time() - start)
-
+            if hparams.calculate_norms:
+                start = time.time()
+                _, svd_upd, _ = torch.linalg.svd(upd_matrix)
+                svd_upd = sorted(svd_upd.detach().cpu().tolist(), reverse=True)
+                
+                _, svd_final, _ = torch.linalg.svd(w[...])
+                svd_final = sorted(svd_final.detach().cpu().tolist(), reverse=True)
+                print('svd calculation time:', time.time() - start)
+            else:
+                svd_upd = None
+                svd_final = None
 
             #saving all distances
             layer = w_name.split('.')[2]
             temp_dict = {
-                'preservation_distance': preservation_distance,
-                'new_edit_distance': new_edit_distance,
-                'old_edit_distance': old_edit_distance,
+                'preservation_distance': None,
+                'new_edit_distance': None,
+                'old_edit_distance': None,
                 'delta_norm': torch.norm(upd_matrix).detach().cpu().item(),
                 'new_weights_norm': torch.norm(w[...]).detach().cpu().item(),
                 'original_weights_norm': original_weights_norm,
-                'inside_norms': inside_norms, 
-                'alpha': alpha,
+                'inside_norms': inside_norms,
+                'alpha': None,
                 'svd_final': svd_final,
-                'svd_upd': svd_upd
+                'svd_upd': svd_upd, 
             }
             distances[layer] = temp_dict
 
@@ -151,14 +113,16 @@ def apply_emmet_to_model(
 
     #return all the objective loss terms, plus the absolute norm of the new weights
 
-    return model, weights_copy, distances
+    return model, weights_copy, distances, time_compute_z, total_inserting 
 
 
-def execute_emmet(
+
+
+def execute_alphaedit(
     model: AutoModelForCausalLM,
     tok: AutoTokenizer,
     requests: List[Dict],
-    hparams: EMMETHyperParams,
+    hparams: AlphaEditLTIHyperParams,
     cache_template: Optional[str] = None,
 ) -> Dict[str, Tuple[torch.Tensor]]:
     """
@@ -193,6 +157,7 @@ def execute_emmet(
     weights_copy = {k: v.detach().clone() for k, v in weights.items()}
 
     # Compute z for final layer
+    start_compute_z = time.time()
     context_templates = get_context_templates(model, tok)
     z_layer = hparams.layers[-1]
     z_list = []
@@ -244,17 +209,23 @@ def execute_emmet(
                 )
                 print(f"Cached k/v pair at {cache_fname}")
     zs = torch.stack(z_list, dim=1)
+    time_compute_z = time.time() - start_compute_z
 
-    # Insert
+
+    editing_times = []
     for i, layer in enumerate(hparams.layers):
+        start_inserting_time = time.time()
         print(f"\n\nLAYER {layer}\n")
+        
+        #pre-compute projection layers
+        if layer not in PROJECTIONS:
+            PROJECTIONS[layer] = get_project(model,tok,layer,hparams)
 
         # Get current model activations
         layer_ks = compute_ks(model, tok, requests, hparams, layer, context_templates).T
         print(f"Writing {layer_ks.size(1)} key/value pair(s) into layer {layer}")
 
         # Compute residual error
-        # NOTE - the use of z_layer to calculate cur_zs instead of layer.
         cur_zs = get_module_input_output_at_words(
             model,
             tok,
@@ -264,42 +235,15 @@ def execute_emmet(
             module_template=hparams.layer_module_tmp,
             fact_token_strategy=hparams.fact_token,
         )[1].T
-
         targets = zs - cur_zs
         print("z error", torch.linalg.norm(targets, dim=0).mean())
 
-        #not sure why this is done because layer_ks.size(1) should be same as targets.size(1)
         repeat_factor = (layer_ks.size(1) // targets.size(1))
         targets = targets.repeat_interleave(repeat_factor, dim=1)
 
-        # force_recompute = layer != hparams.layers[0]
-        cov, preserved_keys = get_cov(
-            model,
-            tok,
-            hparams.rewrite_module_tmp.format(layer),
-            hparams.mom2_dataset,
-            hparams.mom2_n_samples,
-            hparams.mom2_dtype,
-            force_recompute=hparams.calculate_objective_value,
-        )
 
-        # Compute update in double precision
-        #if 'llama' not in model.config._name_or_path.lower():
-        layer_ks, targets, cov = (
-            layer_ks.double(),
-            targets.double(),
-            cov.double()
-        )
 
-        #add optimization hyper-parameters
-        if hparams.mom2_update_weight != 1:
-            cov *= hparams.mom2_update_weight
-
-        if hparams.update_norm_lambda != 0:
-            cov += hparams.update_norm_lambda * torch.eye(cov.shape[0], dtype=cov.dtype, device = cov.device)
-
-        if layer in SEQ_CACHE and hparams.sequential and hparams.add_prev_edits:
-            cov += SEQ_CACHE[layer].to(cov.device)
+        resid = targets / (len(hparams.layers) - i)  # Distribute residual across layers
 
         ##Store previous sequential
         if layer not in SEQ_CACHE:
@@ -307,90 +251,38 @@ def execute_emmet(
         else:
             SEQ_CACHE[layer] += (layer_ks @ layer_ks.T).cpu()
 
-        #####CALCULATING UNIFIED EDITING UPDATES
-        pseudo_inverse = False
-        C_inv_norm = None
-        D_norm = None
-        D_inv_norm = None
-            
-        #calculate C_inv
-        C_inv = torch.inverse(cov)
-        D = layer_ks.T @ C_inv @ layer_ks
-
-        if D.shape[0] > 1:
-            D = D + hparams.emmet_lambda * torch.eye(D.shape[0], dtype=D.dtype, device = D.device)#to counter ill-conditioned D
-            
-        try:
-            D_inv = torch.inverse(D)
-        except:
-            pseudo_inverse = True
-            D_inv = torch.linalg.pinv(D)
-
-        C_inv_norm = torch.norm(C_inv).clone().detach().cpu().item()
-        D_norm = torch.norm(D).clone().detach().cpu().item()
-        D_inv_norm = torch.norm(D_inv).clone().detach().cpu().item()
-        
-        adj_k = (D_inv @ layer_ks.T  @ C_inv).T #Only to write it in memit form
-        ######FINISHING CALCULATING UNIFIED EDITING UPDATES
-
-
-        ###Layer distribution code
-        resid = targets / (len(hparams.layers) - i)  # Distribute residual across layers
-        upd_matrix = resid @ adj_k.T
-
-        ##calculate_norms
-        inside_norms = {
-            'zs_norm' : torch.mean(torch.norm(zs, dim = 0)).detach().cpu().item(),
-            'cur_zs_norm' : torch.mean(torch.norm(cur_zs, dim = 0)).detach().cpu().item(),
-            'layer_ks_norm' : torch.mean(torch.norm(layer_ks, dim = 0)).detach().cpu().item(),
-            'adj_norm' : torch.mean(torch.norm(adj_k , dim = 0)).detach().cpu().item(),
-            'residual_norm' : torch.mean(torch.norm(resid , dim = 0)).detach().cpu().item(),
-            'inside_update_norm' : torch.norm(upd_matrix).detach().cpu().item(),
-            'pseudo_inverse' : pseudo_inverse,
-            'C_inv_norm' : C_inv_norm,
-            'D_inv_norm' : D_inv_norm,
-            'D_norm' : D_norm,
-            'cov' : torch.norm(cov).detach().cpu().item(),
-        }
+        upd_matrix = torch.linalg.solve(
+                PROJECTIONS[layer].cuda() @ SEQ_CACHE[layer].cuda() + hparams.L2*torch.eye(layer_ks.shape[0], dtype=torch.float,device="cuda"), PROJECTIONS[layer].cuda() @ layer_ks @ resid.T
+        )
+        editing_times.append(time.time() - start_inserting_time)
 
         # Adjust update matrix shape
         weight_name = f"{hparams.rewrite_module_tmp.format(layer)}.weight"
         upd_matrix = upd_matrix_match_shape(upd_matrix, weights[weight_name].shape)
-
         print("orig norm", torch.linalg.norm(weights[weight_name]))
         print("upd norm", torch.linalg.norm(upd_matrix))
 
+        ##calculate_norms
+        inside_norms = {
+            'zs_norm' : torch.mean(torch.norm(zs, dim = 0)).detach().cpu().item()
+        }
+        
         # Update model weights and record desired changes in `delta` variable
         with torch.no_grad():
             weights[weight_name][...] = weights_copy[weight_name] + upd_matrix.float()
 
-            #calculate distances
-            if hparams.calculate_objective_value:
-                preservation_distance, new_edit_distance, old_edit_distance = calculate_distances(weights_copy[weight_name], weights[weight_name][...], layer_ks, zs, preserved_keys)
-            else:
-                preservation_distance, new_edit_distance, old_edit_distance = None, None, None
-            
             deltas[weight_name] = (
-                adj_k.detach().cpu(),
-                resid.detach().cpu(),
-                preservation_distance, 
-                new_edit_distance, 
-                old_edit_distance,
+                upd_matrix.cpu(),
                 inside_norms
             )
 
         # Clear GPU memory
-        cov = cov.cpu()
-        for x in [layer_ks, cur_zs, targets]:
-            x = x.cpu()
+        #del U,S,cov
+        for x in [layer_ks, cur_zs, targets, upd_matrix]:
+            x.cpu()
             del x
-        torch.cuda.empty_cache()
 
-        for x in [C_inv, D, D_inv]:
-            x = x.cpu()
-            del x
         torch.cuda.empty_cache()
-
 
     # Restore state of original model
     with torch.no_grad():
@@ -399,29 +291,10 @@ def execute_emmet(
 
     print(f"Deltas successfully computed for {list(weights.keys())}")
 
-    return deltas, z_norms
+    return deltas, z_norms, time_compute_z, editing_times
 
 
-def calculate_distances(original_weights, new_weights, edit_keys, edit_values, preserved_keys):
-    preserved_keys = preserved_keys.to("cuda")
-    if original_weights.shape[0] != preserved_keys.shape[1]:
-        original_weights = original_weights.T
-        new_weights = new_weights.T
 
-    W_old_k_old = preserved_keys.double() @ original_weights.double()
-    W_hat_k_old = preserved_keys.double() @ new_weights.double()
-
-    W_old_k_edits = original_weights.T.double() @ edit_keys.double()
-    W_hat_k_edits = new_weights.T.double() @ edit_keys.double()
-    v_edits = edit_values.double()
-
-    preservation_distance = torch.mean(torch.norm(W_hat_k_old - W_old_k_old, dim = 1)).detach().cpu().item()
-    new_edit_distance = torch.mean(torch.norm( W_hat_k_edits - v_edits, dim = 0)).detach().cpu().item()
-    old_edit_distance = torch.mean(torch.norm( W_old_k_edits - v_edits, dim = 0)).detach().cpu().item()
-
-    preserved_keys = preserved_keys.to("cpu")
-
-    return preservation_distance, new_edit_distance, old_edit_distance
 
 def get_cov(
     model: AutoModelForCausalLM,
@@ -439,28 +312,27 @@ def get_cov(
     """
 
     model_name = model.config._name_or_path.replace("/", "_")
+    model_name = model_name.split('_')[-1]
     key = (model_name, layer_name)
-    feature_key = (model_name, layer_name, 'preserved_keys')
 
     print(f"Retrieving covariance statistics for {model_name} @ {layer_name}.")
-    if key not in COV_CACHE:
+    if key not in COV_CACHE or force_recompute:
         stat, preserved_keys = layer_stats(
-            model,
-            tok,
-            layer_name,
-            STATS_DIR,
-            mom2_dataset,
-            to_collect=["mom2"],
-            sample_size=mom2_n_samples,
-            precision=mom2_dtype,
-            force_recompute=force_recompute,
-        )
-
+                model,
+                tok,
+                layer_name,
+                STATS_DIR,
+                mom2_dataset,
+                to_collect=["mom2"],
+                sample_size=mom2_n_samples,
+                precision=mom2_dtype,
+                force_recompute=force_recompute,
+            )
         COV_CACHE[key] = stat.mom2.moment().float().to("cpu")
-        COV_CACHE[feature_key] = preserved_keys
 
-    return COV_CACHE[key].to("cuda"), COV_CACHE[feature_key]
-
+    return (
+        torch.inverse(COV_CACHE[key].to("cuda")) if inv else COV_CACHE[key].to("cuda")
+    )
 
 
 def upd_matrix_match_shape(matrix: torch.Tensor, shape: torch.Size) -> torch.Tensor:

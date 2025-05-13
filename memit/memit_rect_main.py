@@ -17,7 +17,7 @@ import time
 
 from .compute_ks import compute_ks
 from .compute_z import compute_z, get_module_input_output_at_words, find_fact_lookup_idx
-from .encore_hparams import ENCOREHyperParams
+from .memit_hparams import MEMITHyperParams
 
 # Cache variable(s)
 CONTEXT_TEMPLATES_CACHE = None
@@ -25,11 +25,11 @@ COV_CACHE = {}
 SEQ_CACHE = {}
 
 
-def apply_encore_to_model(
+def apply_memit_rect_to_model(
     model: AutoModelForCausalLM,
     tok: AutoTokenizer,
     requests: List[Dict],
-    hparams: ENCOREHyperParams,
+    hparams: MEMITHyperParams,
     copy=False,
     return_orig_weights=False,
     cache_template: Optional[str] = None,
@@ -46,9 +46,9 @@ def apply_encore_to_model(
         model = deepcopy(model)
 
     if hparams.use_gd:
-        deltas, z_norms = execute_encore_with_gradient_descent(model, tok, requests, hparams, cache_template=cache_template)
+        deltas, z_norms = execute_memit_with_gradient_descent(model, tok, requests, hparams, cache_template=cache_template)
     else:
-        deltas, z_norms, time_compute_z, total_inserting_time = execute_encore(model, tok, requests, hparams, cache_template=cache_template)
+        deltas, z_norms, time_compute_z = execute_memit(model, tok, requests, hparams, cache_template=cache_template)
     distances = {}
     distances['z_norms'] = z_norms
 
@@ -68,9 +68,33 @@ def apply_encore_to_model(
                 weights_copy[w_name] = w.detach().clone()
 
             original_weights_norm = torch.norm(w[...]).detach().cpu().item()
+            k_percent = 40
+            epsilon = 1e-8
+            delta = torch.abs(upd_matrix / (w + epsilon))
+            threshold = torch.kthvalue(delta.reshape(-1), int(delta.numel() * (100 - k_percent) / 100)).values
+            with torch.no_grad():
+                mask = delta >= threshold
+                w[mask] += upd_matrix[mask].float()
 
-            w[...] += upd_matrix.float()
+            # w[...] += upd_matrix.float()
 
+
+            #cap singular value to 11
+            # sv_cap = 11
+            # U, S, Vh = torch.linalg.svd(w[...], full_matrices=False) 
+            # S_clipped = torch.clamp(S, max=sv_cap)
+            # #w[...] =  U @ torch.diag(S_clipped) @ Vh
+
+            # #rescale norm
+            # new_weights_norm = torch.norm(w[...]).detach().cpu().item()
+            # alpha = original_weights_norm/new_weights_norm
+            # #w[...] *= alpha
+
+            # #spectral normalization
+            # gamma = 10.2656
+            # _, S, _ = torch.linalg.svd(w[...], full_matrices=False)
+            # spectral_norm = torch.max(S)
+            # #w[...] = gamma * (w[...] / spectral_norm)
 
 
             if hparams.calculate_norms:
@@ -96,6 +120,7 @@ def apply_encore_to_model(
                 'new_weights_norm': torch.norm(w[...]).detach().cpu().item(),
                 'original_weights_norm': original_weights_norm,
                 'inside_norms': inside_norms,
+                #'alpha': alpha,
                 'svd_final': svd_final,
                 'svd_upd': svd_upd, 
             }
@@ -105,14 +130,13 @@ def apply_encore_to_model(
 
     #return all the objective loss terms, plus the absolute norm of the new weights
 
-    return model, weights_copy, distances, time_compute_z, total_inserting_time
+    return model, weights_copy, distances, time_compute_z
 
-
-def execute_encore(
+def execute_memit(
     model: AutoModelForCausalLM,
     tok: AutoTokenizer,
     requests: List[Dict],
-    hparams: ENCOREHyperParams,
+    hparams: MEMITHyperParams,
     cache_template: Optional[str] = None,
 ) -> Dict[str, Tuple[torch.Tensor]]:
     """
@@ -351,11 +375,11 @@ def execute_encore(
     return deltas, z_norms, time_compute_z, total_inserting_time
 
 
-def execute_encore_with_gradient_descent(
+def execute_memit_with_gradient_descent(
     model: AutoModelForCausalLM,
     tok: AutoTokenizer,
     requests: List[Dict],
-    hparams: ENCOREHyperParams,
+    hparams: MEMITHyperParams,
     cache_template: Optional[str] = None,
 ) -> Dict[str, Tuple[torch.Tensor]]:
     """

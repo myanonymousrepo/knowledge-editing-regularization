@@ -22,9 +22,12 @@ from dsets import (
 from experiments.py.eval_utils_counterfact import compute_rewrite_quality_counterfact
 from experiments.py.eval_utils_zsre import compute_rewrite_quality_zsre
 from memit import MEMITHyperParams, apply_memit_to_model
+from memit.memit_rect_main import apply_memit_rect_to_model
+from memit_lti import MEMITLTIHyperParams, apply_memit_lti_to_model
+from memit_lti.memit_lti_rect_main import apply_memit_lti_rect_to_model
 from rome import ROMEHyperParams, apply_rome_to_model
-from emmet import EMMETHyperParams, apply_emmet_to_model
 from AlphaEdit import AlphaEditHyperParams, apply_AlphaEdit_to_model
+from AlphaEdit_lti import AlphaEditLTIHyperParams, apply_AlphaEdit_lti_to_model
 from encore import ENCOREHyperParams, apply_encore_to_model
 from util import nethook
 from util.globals import *
@@ -32,9 +35,14 @@ from util.globals import *
 from glue_eval.glue_eval import GLUEEval
 
 ALG_DICT = {
-    "EMMET": (EMMETHyperParams, apply_emmet_to_model),
     "MEMIT": (MEMITHyperParams, apply_memit_to_model),
+    "MEMIT_prune" : (MEMITHyperParams, apply_memit_to_model),
+    "MEMIT_rect" : (MEMITHyperParams, apply_memit_rect_to_model),
+    "MEMIT_lti" : (MEMITLTIHyperParams, apply_memit_lti_to_model),
+    "MEMIT_lti_prune" : (MEMITLTIHyperParams, apply_memit_lti_to_model),
+    "MEMIT_lti_rect" : (MEMITLTIHyperParams, apply_memit_lti_rect_to_model),
     "AlphaEdit": (AlphaEditHyperParams, apply_AlphaEdit_to_model),
+    "AlphaEdit_lti": (AlphaEditLTIHyperParams, apply_AlphaEdit_lti_to_model),
     "ROME": (ROMEHyperParams, apply_rome_to_model),
     "FT": (FTHyperParams, apply_ft_to_model),
     "MEND": (MENDHyperParams, MendRewriteExecutor().apply_to_model),
@@ -274,21 +282,132 @@ def main(
             with open(output_filename, "w") as f:
                 json.dump(glue_results, f, indent=4)
 
-
+    
         start = time()
-        edited_model, weights_copy, objective_distances = apply_algo(
-            model,
-            tok,
-            [
-                {"case_id": record["case_id"], **record["requested_rewrite"]}
-                for record in record_chunks
-            ],
-            hparams,
-            copy=False,
-            return_orig_weights=True,
-            **args_conserve_memory,
-            **etc_args,
-        )
+        if alg_name == "MEMIT_prune":
+            if r == 0:
+                edited_model, weights_copy, objective_distances, time_compute_z, total_inserting_time = apply_algo(
+                    model,
+                    tok,
+                    [
+                        {"case_id": record["case_id"], **record["requested_rewrite"]}
+                        for record in record_chunks
+                    ],
+                    hparams,
+                    copy=False,
+                    return_orig_weights=True,
+                    **args_conserve_memory,
+                    **etc_args,
+                )
+                upd_matrix = {}
+            else:
+                edited_model, weights_copy, objective_distances, time_compute_z, total_inserting_time = apply_algo(
+                    model,
+                    tok,
+                    [
+                        {"case_id": record["case_id"], **record["requested_rewrite"]}
+                        for record in record_chunks
+                    ],
+                    hparams,
+                    copy=False,
+                    return_orig_weights=True,
+                    **args_conserve_memory,
+                    **etc_args,
+                )
+            if r == (max_examples // num_edits) - 1:
+                # Calculate the weight update matrix
+                with torch.no_grad():
+                    for k, v in weights_copy.items():
+                        current_weight = nethook.get_parameter(model, k)
+                        upd_matrix[k] = current_weight - v.to("cuda")
+                        # Calculate max singular value of the original weight
+                        _, S_orig, _ = torch.svd(v)
+                        max_sigma = S_orig.max().item()
+
+                        # Adjust the upd_matrix singular values
+                        U_upd, S_upd, V_upd = torch.svd(upd_matrix[k])
+                        adjusted_S = torch.where(
+                            S_upd > max_sigma,
+                            torch.log(S_upd) - torch.log(torch.tensor(max_sigma, device='cuda')) + max_sigma,
+                            S_upd
+                        )
+                        upd_matrix[k] = torch.matmul(U_upd, torch.matmul(torch.diag(adjusted_S), V_upd.t()))
+
+                # Apply the adjusted updates to the model
+                with torch.no_grad():
+                    for k in upd_matrix:
+                        original_weight = nethook.get_parameter(model, k)
+                        adjusted_weight = original_weight + upd_matrix[k]
+                        original_weight.copy_(adjusted_weight)
+        elif alg_name == "MEMIT_lti_prune":
+            if r == 0:
+                edited_model, weights_copy, objective_distances, time_compute_z, total_inserting_time = apply_algo(
+                    model,
+                    tok,
+                    [
+                        {"case_id": record["case_id"], **record["requested_rewrite"]}
+                        for record in record_chunks
+                    ],
+                    hparams,
+                    copy=False,
+                    return_orig_weights=True,
+                    **args_conserve_memory,
+                    **etc_args,
+                )
+                upd_matrix = {}
+            else:
+                edited_model, weights_copy, objective_distances, time_compute_z, total_inserting_time = apply_algo(
+                    model,
+                    tok,
+                    [
+                        {"case_id": record["case_id"], **record["requested_rewrite"]}
+                        for record in record_chunks
+                    ],
+                    hparams,
+                    copy=False,
+                    return_orig_weights=True,
+                    **args_conserve_memory,
+                    **etc_args,
+                )
+            if r == (max_examples // num_edits) - 1:
+                # Calculate the weight update matrix
+                with torch.no_grad():
+                    for k, v in weights_copy.items():
+                        current_weight = nethook.get_parameter(model, k)
+                        upd_matrix[k] = current_weight - v.to("cuda")
+                        # Calculate max singular value of the original weight
+                        _, S_orig, _ = torch.svd(v)
+                        max_sigma = S_orig.max().item()
+
+                        # Adjust the upd_matrix singular values
+                        U_upd, S_upd, V_upd = torch.svd(upd_matrix[k])
+                        adjusted_S = torch.where(
+                            S_upd > max_sigma,
+                            torch.log(S_upd) - torch.log(torch.tensor(max_sigma, device='cuda')) + max_sigma,
+                            S_upd
+                        )
+                        upd_matrix[k] = torch.matmul(U_upd, torch.matmul(torch.diag(adjusted_S), V_upd.t()))
+
+                # Apply the adjusted updates to the model
+                with torch.no_grad():
+                    for k in upd_matrix:
+                        original_weight = nethook.get_parameter(model, k)
+                        adjusted_weight = original_weight + upd_matrix[k]
+                        original_weight.copy_(adjusted_weight)
+        else:
+            edited_model, weights_copy, objective_distances, time_compute_z, total_inserting_time = apply_algo(
+                model,
+                tok,
+                [
+                    {"case_id": record["case_id"], **record["requested_rewrite"]}
+                    for record in record_chunks
+                ],
+                hparams,
+                copy=False,
+                return_orig_weights=True,
+                **args_conserve_memory,
+                **etc_args,
+            )
 
         exec_time = time() - start
         print("Execution took", exec_time)
@@ -335,6 +454,8 @@ def main(
                     "num_edits": num_edits,
                     "requested_rewrite": record["requested_rewrite"],
                     "time": exec_time,
+                    "compute_z_time": time_compute_z,
+                    "inserting_time": total_inserting_time,
                     "post": ds_eval_method(
                         edited_model,
                         tok,
@@ -395,6 +516,8 @@ def main(
                     "num_edits": num_edits,
                     "requested_rewrite": record["requested_rewrite"],
                     "time": exec_time,
+                    "compute_z_time": time_compute_z,
+                    "inserting_time": total_inserting_time,
                     "post": ds_eval_method(
                         edited_model,
                         tok,
@@ -477,7 +600,7 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--alg_name",
-        choices=["MEMIT", "ROME", "EMMET", "FT", "AlphaEdit", "ENCORE"],
+        choices=["MEMIT", "ROME", "FT", "AlphaEdit","ENCORE", "MEMIT_prune", "MEMIT_rect", "MEMIT_lti", "MEMIT_lti_prune", "MEMIT_lti_rect", "AlphaEdit_lti"],
         default="ENCORE",
         help="Editing algorithm to use. Results are saved in results/<alg_name>/<run_id>, "
         "where a new run_id is generated on each run. "

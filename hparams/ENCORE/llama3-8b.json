@@ -34,5 +34,6 @@
     "grad_desc_steps": 100, 
     "gd_lambda": 50,
     "spectral_norm": 2, 
-    "condition_num": 50
+    "condition_num": 50,
+    "calculate_norms": false
 }

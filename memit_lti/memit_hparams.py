@@ -5,7 +5,7 @@ from util.hparams import HyperParams
 
 
 @dataclass
-class EMMETHyperParams(HyperParams):
+class MEMITLTIHyperParams(HyperParams):
     # Method
     layers: List[int]
     layer_selection: Literal["all", "random"]
@@ -17,7 +17,8 @@ class EMMETHyperParams(HyperParams):
     v_loss_layer: int
     v_weight_decay: float
     clamp_norm_factor: float
-    kl_factor: float
+    mid_kl_factor: float
+    last_kl_factor: float
     mom2_adjustment: bool
     mom2_update_weight: float
 
@@ -34,12 +35,19 @@ class EMMETHyperParams(HyperParams):
     mom2_n_samples: int
     mom2_dtype: str
 
-    #Objective
-    calculate_objective_value: bool
-    add_prev_edits: bool
-    update_norm_lambda: float
-    emmet_lambda: float
+    # Midlayer Constraint
+    midlayers: List[int]
+    constr_pos: str
 
-    #new hparams
-    prob_cutoff: float
-    norm_control: float
+    update_norm_lambda: float
+
+    # NLL loss
+    nll_factor: float = 0.0925
+
+    # Sentence Transformers
+    sentence_model_name: str = None
+    top_k: int = 4
+
+    add_prev_edits: bool = True
+    calculate_objective_value: bool = False
+    calculate_norms: bool = False

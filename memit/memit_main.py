@@ -48,7 +48,7 @@ def apply_memit_to_model(
     if hparams.use_gd:
         deltas, z_norms = execute_memit_with_gradient_descent(model, tok, requests, hparams, cache_template=cache_template)
     else:
-        deltas, z_norms = execute_memit(model, tok, requests, hparams, cache_template=cache_template)
+        deltas, z_norms, time_compute_z, total_inserting_time = execute_memit(model, tok, requests, hparams, cache_template=cache_template)
     distances = {}
     distances['z_norms'] = z_norms
 
@@ -72,31 +72,17 @@ def apply_memit_to_model(
             w[...] += upd_matrix.float()
 
 
-            #cap singular value to 11
-            sv_cap = 11
-            U, S, Vh = torch.linalg.svd(w[...], full_matrices=False) 
-            S_clipped = torch.clamp(S, max=sv_cap)
-            #w[...] =  U @ torch.diag(S_clipped) @ Vh
-
-            #rescale norm
-            new_weights_norm = torch.norm(w[...]).detach().cpu().item()
-            alpha = original_weights_norm/new_weights_norm
-            #w[...] *= alpha
-
-            #spectral normalization
-            gamma = 10.2656
-            _, S, _ = torch.linalg.svd(w[...], full_matrices=False)
-            spectral_norm = torch.max(S)
-            #w[...] = gamma * (w[...] / spectral_norm)
-
-
-            start = time.time()
-            _, svd_upd, _ = torch.linalg.svd(upd_matrix)
-            svd_upd = sorted(svd_upd.detach().cpu().tolist(), reverse=True)
-            
-            _, svd_final, _ = torch.linalg.svd(w[...])
-            svd_final = sorted(svd_final.detach().cpu().tolist(), reverse=True)
-            print('svd calculation time:', time.time() - start)
+            if hparams.calculate_norms:
+                start = time.time()
+                _, svd_upd, _ = torch.linalg.svd(upd_matrix)
+                svd_upd = sorted(svd_upd.detach().cpu().tolist(), reverse=True)
+                
+                _, svd_final, _ = torch.linalg.svd(w[...])
+                svd_final = sorted(svd_final.detach().cpu().tolist(), reverse=True)
+                print('svd calculation time:', time.time() - start)
+            else:
+                svd_upd = None
+                svd_final = None
 
 
             #saving all distances
@@ -109,7 +95,6 @@ def apply_memit_to_model(
                 'new_weights_norm': torch.norm(w[...]).detach().cpu().item(),
                 'original_weights_norm': original_weights_norm,
                 'inside_norms': inside_norms,
-                'alpha': alpha,
                 'svd_final': svd_final,
                 'svd_upd': svd_upd, 
             }
@@ -119,7 +104,7 @@ def apply_memit_to_model(
 
     #return all the objective loss terms, plus the absolute norm of the new weights
 
-    return model, weights_copy, distances
+    return model, weights_copy, distances, time_compute_z, total_inserting_time
 
 
 def execute_memit(
@@ -161,6 +146,7 @@ def execute_memit(
     weights_copy = {k: v.detach().clone() for k, v in weights.items()}
 
     # Compute z for final layer
+    start_compute_z = time.time()
     context_templates = get_context_templates(model, tok)
     z_layer = hparams.layers[-1]
     z_list = []
@@ -212,9 +198,12 @@ def execute_memit(
                 )
                 print(f"Cached k/v pair at {cache_fname}")
     zs = torch.stack(z_list, dim=1)
+    time_compute_z = time.time() - start_compute_z
 
     # Insert
+    editing_times = []
     for i, layer in enumerate(hparams.layers):
+        start_insertion_time = time.time()
         print(f"\n\nLAYER {layer}\n")
 
         # Get current model activations
@@ -290,20 +279,18 @@ def execute_memit(
         adj_k = torch.linalg.solve(
             cov + layer_ks @ layer_ks.T,
             layer_ks,
-        )   
+        ).cuda()
 
         ###Layer distribution code
         resid = targets / (len(hparams.layers) - i)  # Distribute residual across layers
         upd_matrix = resid @ adj_k.T
 
-        weight_name = f"{hparams.rewrite_module_tmp.format(layer)}.weight"
-        original_weights = weights[weight_name]
-        upd_matrix = upd_matrix_match_shape(upd_matrix, weights[weight_name].shape)
+        editing_times.append(time.time() - start_insertion_time)
 
         #mu = 1.0
         #upd_matrix -= (mu / 2) * (original_weights.double().T @ cov @ C_eff_inv).T
 
-
+        
         ##calculate_norms
         inside_norms = {
             'zs_norm' : torch.mean(torch.norm(zs, dim = 0)).detach().cpu().item(),
@@ -359,8 +346,8 @@ def execute_memit(
             v[...] = weights_copy[k]
 
     print(f"Deltas successfully computed for {list(weights.keys())}")
-
-    return deltas, z_norms
+    total_inserting_time = sum(editing_times)
+    return deltas, z_norms, time_compute_z, total_inserting_time
 
 
 def execute_memit_with_gradient_descent(

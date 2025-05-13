@@ -55,3 +55,6 @@ class MEMITHyperParams(HyperParams):
     gd_lambda: float
     spectral_norm: float
     condition_num: float
+
+    #calculate norm
+    calculate_norms: bool

@@ -23,5 +23,6 @@
     "nullspace_threshold":2e-2,
     "L2":10,
     "prob_cutoff":0, 
-    "norm_control":0
+    "norm_control":0,
+    "calculate_norm":false
 }

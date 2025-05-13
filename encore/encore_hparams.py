@@ -55,3 +55,5 @@ class ENCOREHyperParams(HyperParams):
     gd_lambda: float
     spectral_norm: float
     condition_num: float
+
+    calculate_norms: bool

@@ -5,7 +5,7 @@ from util.hparams import HyperParams
 
 
 @dataclass
-class AlphaEditHyperParams(HyperParams):
+class AlphaEditLTIHyperParams(HyperParams):
     # Method
     model_name: str
     layers: List[int]
@@ -18,7 +18,8 @@ class AlphaEditHyperParams(HyperParams):
     v_loss_layer: int
     v_weight_decay: float
     clamp_norm_factor: float
-    kl_factor: float
+    mid_kl_factor: float
+    last_kl_factor: float
     mom2_adjustment: bool
     mom2_update_weight: float
 
@@ -40,5 +41,16 @@ class AlphaEditHyperParams(HyperParams):
     #new hparams
     prob_cutoff: float
     norm_control: float
-    calculate_norms: bool
+    
+    # Midlayer Constraint
+    midlayers: List[int]
+    constr_pos: str
 
+    # NLL loss
+    nll_factor: float = 0.0925
+
+    # Sentence Transformers
+    sentence_model_name: str = None
+    top_k: int = 4
+
+    calculate_norms:bool = False

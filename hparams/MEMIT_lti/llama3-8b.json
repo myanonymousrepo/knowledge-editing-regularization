@@ -1,14 +1,21 @@
 {
-    "model_name": "Llama3-8B",
-    "layers": [4, 5, 6, 7, 8],
-    "clamp_norm_factor": 0.75,
+    "layers": [
+        4,
+        5,
+        6,
+        7,
+        8
+    ],
+    "clamp_norm_factor": 4,
     "layer_selection": "all",
     "fact_token": "subject_last",
-    "v_num_grad_steps": 25,
-    "v_lr": 1e-1,
+    "v_num_grad_steps": 30,
+    "v_lr": 5e-1,
     "v_loss_layer": 31,
-    "v_weight_decay": 0.5,
-    "kl_factor": 0.0625,
+    "v_weight_decay": 1e-3,
+    "mid_kl_factor": 0.0425,
+    "last_kl_factor": 0.0725,
+    "nll_factor": 0.125,
     "mom2_adjustment": true,
     "mom2_update_weight": 15000,
     "rewrite_module_tmp": "model.layers.{}.mlp.down_proj",
@@ -20,9 +27,12 @@
     "mom2_dataset": "wikipedia",
     "mom2_n_samples": 10000,
     "mom2_dtype": "float32",
-    "nullspace_threshold":2e-2,
-    "L2":10,
-    "prob_cutoff":0, 
-    "norm_control":0,
-    "calculate_norm":false
+    "midlayers": [
+        15
+    ],
+    "constr_pos": "subject",
+    "add_prev_edits": true,
+    "calculate_objective_value": false,
+    "calculate_norms": false,
+    "update_norm_lambda": 0
 }
