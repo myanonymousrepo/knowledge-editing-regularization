@@ -48,7 +48,7 @@ def apply_memit_rect_to_model(
     if hparams.use_gd:
         deltas, z_norms = execute_memit_with_gradient_descent(model, tok, requests, hparams, cache_template=cache_template)
     else:
-        deltas, z_norms, time_compute_z = execute_memit(model, tok, requests, hparams, cache_template=cache_template)
+        deltas, z_norms, time_compute_z, total_insereting_time = execute_memit(model, tok, requests, hparams, cache_template=cache_template)
     distances = {}
     distances['z_norms'] = z_norms
 
@@ -130,7 +130,7 @@ def apply_memit_rect_to_model(
 
     #return all the objective loss terms, plus the absolute norm of the new weights
 
-    return model, weights_copy, distances, time_compute_z
+    return model, weights_copy, distances, time_compute_z, total_insereting_time
 
 def execute_memit(
     model: AutoModelForCausalLM,

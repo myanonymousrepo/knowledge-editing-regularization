@@ -8,7 +8,8 @@
     "v_lr": 5e-1,
     "v_loss_layer": 47,
     "v_weight_decay": 0.5,
-    "kl_factor": 0.0625,
+    "mid_kl_factor": 0.0525,
+    "last_kl_factor": 0.0425,
     "mom2_adjustment": true,
     "mom2_update_weight": 20000,
     "rewrite_module_tmp": "transformer.h.{}.mlp.c_proj",
@@ -20,9 +21,13 @@
     "mom2_dataset": "wikipedia",
     "mom2_n_samples": 100000,
     "mom2_dtype": "float32",
+    "midlayers": [
+        30
+    ],
+    "constr_pos": "subject",
     "nullspace_threshold":2e-2,
     "L2":10,
     "prob_cutoff":0, 
     "norm_control":0,
-    "calculate_norm":false
+    "calculate_norms":false
 }

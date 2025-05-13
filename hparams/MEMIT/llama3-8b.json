@@ -35,5 +35,5 @@
     "gd_lambda": 50,
     "spectral_norm": 2, 
     "condition_num": 50,
-    "calculate_norm":false
+    "calculate_norms":false
 }

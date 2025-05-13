@@ -609,14 +609,14 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--model_name",
-        choices=["gpt2-xl", "EleutherAI/gpt-j-6B", "Llama-2-7b-hf", "Meta-Llama-3-8B"],
+        choices=["gpt2-xl", "Llama-2-7b-hf", "Meta-Llama-3-8B"],
         help="Model to edit.",
         required=True,
     )
     parser.add_argument(
         "--hparams_fname",
         type=str,
-        choices=["gpt2-xl", "EleutherAI_gpt-j-6B", "llama2-7b", "llama3-8b"],
+        choices=["gpt2-xl", "llama2-7b", "llama3-8b"],
         default="gpt2-xl.json",
         help="Name of hyperparameters file, located in the hparams/<alg_name> folder.",
         required=False,

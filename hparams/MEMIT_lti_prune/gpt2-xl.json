@@ -33,5 +33,6 @@
     "constr_pos": "subject",
     "add_prev_edits": true,
     "calculate_objective_value": false,
-    "calculate_norms": false
+    "calculate_norms": false,
+    "update_norm_lambda": 0
 }
